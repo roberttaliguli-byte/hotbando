@@ -24,6 +24,7 @@ my $db_pass = $ENV{DB_PASSWORD} || 'hotbando_pass';
 
 use constant {
     RLM_MODULE_REJECT  => 0,
+    RLM_MODULE_FAIL    => 1,
     RLM_MODULE_OK      => 2,
     RLM_MODULE_HANDLED => 3,
     RLM_MODULE_INVALID => 4,
@@ -210,22 +211,29 @@ sub accounting {
     my $input = ($RAD_REQUEST{'Acct-Input-Gigawords'} || 0) * 4294967296 + ($RAD_REQUEST{'Acct-Input-Octets'} || 0);
     my $output = ($RAD_REQUEST{'Acct-Output-Gigawords'} || 0) * 4294967296 + ($RAD_REQUEST{'Acct-Output-Octets'} || 0);
     my $dbh = _db_connect();
-    return RLM_MODULE_OK unless $dbh;
+    return RLM_MODULE_FAIL unless $dbh;
 
-    eval {
+    my $success = eval {
+        # Make DBI method failures throw so every failed statement aborts the
+        # transaction and prevents an Accounting-Response from acknowledging
+        # usage that was not committed.
+        $dbh->{RaiseError} = 1;
+        $dbh->{PrintError} = 0;
         $dbh->begin_work();
         $dbh->do(
-            'INSERT IGNORE INTO radius_usage_sessions (nas_identity, acct_session_id, username, mac_address) VALUES (?, ?, ?, ?)',
+            'INSERT INTO radius_usage_sessions (nas_identity, acct_session_id, username, mac_address) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE acct_session_id = acct_session_id',
             undef, $nas, $session_id, $username, $mac
         );
-        # Read session without locking (we only need the current octets, not for update)
+        # Serialize accounting packets for this session before deriving a
+        # delta. Retransmitted and out-of-order octet totals cannot double bill.
         my $session = $dbh->selectrow_hashref(
-            'SELECT input_octets, output_octets FROM radius_usage_sessions WHERE nas_identity = ? AND acct_session_id = ?',
+            'SELECT input_octets, output_octets FROM radius_usage_sessions WHERE nas_identity = ? AND acct_session_id = ? FOR UPDATE',
             undef, $nas, $session_id
         );
+        die 'RADIUS usage session row was not found after insert' unless $session;
         my $delta = ($input > ($session->{input_octets} || 0) ? $input - ($session->{input_octets} || 0) : 0)
                   + ($output > ($session->{output_octets} || 0) ? $output - ($session->{output_octets} || 0) : 0);
-        # Update session and user together in one statement to minimize lock time
+        # Persist high-water octets while holding the session row lock.
         $dbh->do(
             'UPDATE radius_usage_sessions SET username = ?, mac_address = ?, input_octets = GREATEST(input_octets, ?), output_octets = GREATEST(output_octets, ?), last_accounting_at = NOW() WHERE nas_identity = ? AND acct_session_id = ?',
             undef, $username, $mac, $input, $output, $nas, $session_id
@@ -240,32 +248,39 @@ sub accounting {
                 $where = 'phone_number = ?';
                 @args = ($username);
             }
-            # Read user data without locking to check eligibility
+            # Serialize deductions across all sessions belonging to this user.
             my $user = $dbh->selectrow_hashref(
                 "SELECT id, paid_bytes_remaining, paid_data_limit_bytes, free_bytes,
                         (usage_until > NOW()) AS paid_active
-                 FROM users WHERE $where AND role = 'customer' LIMIT 1",
+                 FROM users WHERE $where AND role = 'customer' LIMIT 1 FOR UPDATE",
                 undef, @args
             );
             if ($user && !($user->{paid_active} && int($user->{paid_data_limit_bytes} || 0) == 0)) {
                 my $paid_left = int($user->{paid_bytes_remaining} || 0);
-                my $free_left = int($user->{free_bytes} || 0);
+                $paid_left = 0 if $paid_left < 0;
                 my $from_paid = $delta < $paid_left ? $delta : $paid_left;
-                $paid_left -= $from_paid;
                 my $from_free = $delta - $from_paid;
-                $free_left = $from_free >= $free_left ? 0 : $free_left - $from_free;
-                # This update can fail silently if the row was deleted or changed in between; that's okay
-                $dbh->do('UPDATE users SET paid_bytes_remaining = ?, free_bytes = ? WHERE id = ?', undef, $paid_left, $free_left, $user->{id});
+                # Relative updates preserve concurrent changes; row locks above
+                # make the paid-first split use the current committed balances.
+                $dbh->do(
+                    'UPDATE users SET paid_bytes_remaining = GREATEST(paid_bytes_remaining - ?, 0), free_bytes = GREATEST(COALESCE(free_bytes, 0) - ?, 0) WHERE id = ?',
+                    undef, $from_paid, $from_free, $user->{id}
+                );
             }
         }
         $dbh->commit();
         1;
-    } or do {
+    };
+
+    if (!$success) {
         my $error = $@ || 'RADIUS accounting failed';
         eval { $dbh->rollback(); };
         warn "HotBando RADIUS usage accounting failed: $error";
-    };
-    $dbh->disconnect();
+        eval { $dbh->disconnect(); };
+        return RLM_MODULE_FAIL;
+    }
+
+    eval { $dbh->disconnect(); };
     return RLM_MODULE_OK;
 }
 
