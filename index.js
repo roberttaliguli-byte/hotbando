@@ -1,3 +1,6 @@
+require('dotenv').config();
+require('./config/validateEnv')();
+
 // Handle !empty and other transient RouterOS replies globally (before any module loads)
 process.on('uncaughtException', (error) => {
     // While a router repair is being applied, capture the real stack into the
@@ -28,8 +31,6 @@ process.on('unhandledRejection', (reason) => {
     console.error('Unhandled rejection:', reason);
 });
 
-// index.js
-require('dotenv').config();
 const express = require('express');
 const session = require('express-session');
 const path = require('path');

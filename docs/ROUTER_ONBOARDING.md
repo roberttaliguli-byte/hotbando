@@ -35,6 +35,18 @@ and the router talks to FreeRADIUS (UDP 1812/1813) for hotspot auth/accounting.
 5. Firewall: incoming **TCP 80/443**, **UDP 1812/1813** (RADIUS) and
    **UDP 51820** (WireGuard) — all already open on the HotBando VPS.
 
+## Router API password rotation
+
+This release requires `MIKROTIK_API_PASSWORD` to be explicitly configured but
+does not rotate or change its current value. For a later rotation, inventory
+the API username and credential stored for each router, confirm backup access
+over WireGuard, and stage the replacement credential on routers while the old
+credential remains valid. Update and verify each router's stored connection
+credentials, then change the server environment value after the fleet is
+confirmed on the replacement. Remove the old router credential only after the
+server successfully reconnects to every router. Do not rotate the shared value
+first: it is also used by provisioning and as a connection fallback.
+
 ---
 
 # Option A — Zero-Touch Connect (for a layman)

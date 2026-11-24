@@ -71,7 +71,7 @@ ALLOWED_ORIGINS=https://hotbando.example.com
 
 # Database (MUST match docker-compose.yml db service!)
 DB_USER=hotbando
-DB_PASSWORD=hotbando_pass                 # keep in sync with MYSQL_PASSWORD below
+DB_PASSWORD=<replace-with-database-password> # keep in sync with MYSQL_PASSWORD below
 DB_HOST=db
 DB_PORT=3306
 

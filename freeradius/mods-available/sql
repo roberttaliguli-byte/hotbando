@@ -21,7 +21,7 @@ sql {
     server = "db"
     port = 3306
     login = "hotbando"
-    password = "hotbando_pass"
+    password = "$ENV{DB_PASSWORD}"
 
     # Database name (use the same hotbando database)
     radius_db = "hotbando"

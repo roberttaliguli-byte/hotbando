@@ -185,7 +185,7 @@ router.post('/quick-setup/:routerID', async (req, res) => {
             host: req.body.host || '10.7.0.4',
             port: 8728,
             user: req.body.user || 'admin',
-            password: req.body.password || 'admin',
+            password: req.body.password || process.env.MIKROTIK_DEFAULT_PASSWORD || 'admin',
             ssid
         });
 

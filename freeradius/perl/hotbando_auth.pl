@@ -20,7 +20,8 @@ my $db_host = $ENV{DB_HOST} || 'db';
 my $db_port = $ENV{DB_PORT} || '3306';
 my $db_name = $ENV{DB_NAME} || 'hotbando';
 my $db_user = $ENV{DB_USER} || 'hotbando';
-my $db_pass = $ENV{DB_PASSWORD} || 'hotbando_pass';
+my $db_pass = $ENV{DB_PASSWORD};
+my $missing_db_password_logged = 0;
 
 use constant {
     RLM_MODULE_REJECT  => 0,
@@ -32,6 +33,12 @@ use constant {
 };
 
 sub _db_connect {
+    if (!defined($db_pass) || $db_pass eq '') {
+        if (!$missing_db_password_logged++) {
+            warn "HotBando RADIUS: DB_PASSWORD is unset; refusing database connection\n";
+        }
+        return undef;
+    }
     return DBI->connect(
         "DBI:mysql:database=$db_name;host=$db_host;port=$db_port",
         $db_user, $db_pass,

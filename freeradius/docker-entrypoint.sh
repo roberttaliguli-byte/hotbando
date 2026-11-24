@@ -14,9 +14,4 @@ for f in /etc/raddb/clients.conf /etc/raddb/mikrotik.secret; do
     fi
 done
 
-# Also substitute in SQL module config
-if [ -f /etc/raddb/mods-enabled/sql ]; then
-    sed -i "s/hotbando_pass/$DB_PASSWORD/g" /etc/raddb/mods-enabled/sql
-fi
-
 exec freeradius -f "$@"
