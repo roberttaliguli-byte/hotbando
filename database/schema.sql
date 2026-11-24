@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS `users` (
   `package` VARCHAR(100) NULL,
   `usage_start` DATETIME NULL,
   `usage_until` DATETIME NULL,
+  `expiry_disconnect_attempts` INT UNSIGNED NOT NULL DEFAULT 0,
   `free_bytes` BIGINT DEFAULT 10485760, -- 10MB default
   `paid_bytes_remaining` BIGINT NOT NULL DEFAULT 0,
   `paid_data_limit_bytes` BIGINT NOT NULL DEFAULT 0 COMMENT '0 means the current paid entitlement has no data cap',
@@ -108,6 +109,23 @@ CREATE TABLE IF NOT EXISTS `user_suspensions` (
   PRIMARY KEY (`id`),
   KEY `idx_user` (`user_id`),
   FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Router cleanup that could not be completed before suspending/deleting a user.
+-- This table intentionally has no users foreign key so delete retries survive.
+CREATE TABLE IF NOT EXISTS `pending_router_revocations` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id` INT(11) NULL,
+  `mac_address` VARCHAR(50) NOT NULL,
+  `router_id` VARCHAR(50) NOT NULL,
+  `reason` VARCHAR(32) NOT NULL,
+  `retry_count` INT UNSIGNED NOT NULL DEFAULT 0,
+  `last_error` TEXT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_pending_router_revocation` (`mac_address`, `router_id`),
+  KEY `idx_pending_router_revocations_created` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================

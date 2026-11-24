@@ -6,6 +6,7 @@ const { extendUserPackage } = require('../utils/packageEntitlement');
 const Campaign = require('../models/Campaign');
 const { LIVE_AD_SQL, MAX_DAILY_AD_REWARD_BYTES } = require('../utils/adPolicy');
 const { claimPendingGrants } = require('../utils/pendingGrants');
+const { revokeOrQueue } = require('../services/routerRevocation');
 
 // Utility functions
 function normalizePhoneNumber(raw) {
@@ -1204,12 +1205,20 @@ const hotspotController = {
       console.log(`⏸️ Suspending user ${id}`);
 
       // Check if user exists
-      const [users] = await db.execute('SELECT id, name FROM users WHERE id = ? AND role = "customer"', [id]);
+      const [users] = await db.execute(
+        'SELECT id, name, mac_address, last_router_id FROM users WHERE id = ? AND role = "customer"',
+        [id]
+      );
       if (users.length === 0) {
         return res.status(404).json({ success: false, message: 'User not found' });
       }
 
       const user = users[0];
+
+      const revocation = await revokeOrQueue(user, 'suspend');
+      if (revocation.pending) {
+        console.warn(`Router revocation queued while suspending customer ${id}`);
+      }
 
       // Add to suspension table
       await db.execute(
@@ -1249,12 +1258,20 @@ const hotspotController = {
       console.log(`🗑️ Deleting user ${id}`);
 
       // Check if user exists
-      const [users] = await db.execute('SELECT id, name FROM users WHERE id = ? AND role = "customer"', [id]);
+      const [users] = await db.execute(
+        'SELECT id, name, mac_address, last_router_id FROM users WHERE id = ? AND role = "customer"',
+        [id]
+      );
       if (users.length === 0) {
         return res.status(404).json({ success: false, message: 'User not found' });
       }
 
       const user = users[0];
+
+      const revocation = await revokeOrQueue(user, 'delete');
+      if (revocation.pending) {
+        console.warn(`Router revocation queued while deleting customer ${id}`);
+      }
 
       // Delete user
       const [result] = await db.execute('DELETE FROM users WHERE id = ? AND role = "customer"', [id]);

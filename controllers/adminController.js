@@ -4,6 +4,7 @@ const mikrotikService = require('../utils/mikrotik');
 const bcrypt = require('bcryptjs');
 const path = require('path');
 const fs = require('fs');
+const { revokeOrQueue } = require('../services/routerRevocation');
 
 function stripRouterSecrets(router) {
   if (!router) return router;
@@ -979,9 +980,17 @@ async getAdViewsForAnalytics(req, res) {
       const { id } = req.params;
       const { reason, suspended_until, is_permanent } = req.body;
 
-      const [users] = await db.execute('SELECT id, name FROM users WHERE id = ? AND role = "customer"', [id]);
+      const [users] = await db.execute(
+        'SELECT id, name, mac_address, last_router_id FROM users WHERE id = ? AND role = "customer"',
+        [id]
+      );
       if (users.length === 0) {
         return res.status(404).json({ success: false, message: 'Mtumiaji hakupatikana' });
+      }
+
+      const revocation = await revokeOrQueue(users[0], 'suspend');
+      if (revocation.pending) {
+        console.warn(`Router revocation queued while suspending customer ${id}`);
       }
 
       await db.execute(
@@ -1048,6 +1057,18 @@ async getAdViewsForAnalytics(req, res) {
   async deleteCustomer(req, res) {
     try {
       const { id } = req.params;
+      const [users] = await db.execute(
+        'SELECT id, mac_address, last_router_id FROM users WHERE id = ? AND role = "customer"',
+        [id]
+      );
+      if (users.length === 0) {
+        return res.status(404).json({ success: false, message: 'Mtumiaji hakupatikana' });
+      }
+      const revocation = await revokeOrQueue(users[0], 'delete');
+      if (revocation.pending) {
+        console.warn(`Router revocation queued while deleting customer ${id}`);
+      }
+
       const [result] = await db.execute('DELETE FROM users WHERE id = ? AND role = "customer"', [id]);
       if (result.affectedRows === 0) {
         return res.status(404).json({ success: false, message: 'Mtumiaji hakupatikana' });
@@ -1747,13 +1768,19 @@ async getAdViewsForAnalytics(req, res) {
   async deleteUser(req, res) {
     try {
       const { id } = req.params;
-      const [users] = await db.execute('SELECT id, role FROM users WHERE id = ?', [id]);
+      const [users] = await db.execute(
+        'SELECT id, role, mac_address, last_router_id FROM users WHERE id = ?', [id]
+      );
       if (users.length === 0) {
         return res.status(404).json({ success: false, message: 'Mtumiaji hakupatikana' });
       }
       // Only allow deleting customers, not admins or partners
       if (users[0].role !== 'customer') {
         return res.status(403).json({ error: 'Cannot delete non-customer users' });
+      }
+      const revocation = await revokeOrQueue(users[0], 'delete');
+      if (revocation.pending) {
+        console.warn(`Router revocation queued while deleting customer ${id}`);
       }
       await db.execute('DELETE FROM users WHERE id = ?', [id]);
       return res.json({ success: true, message: 'Mtumiaji amefutwa kikamilifu', deletedId: id });

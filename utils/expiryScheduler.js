@@ -34,6 +34,7 @@ class ExpiryScheduler {
 
         try {
             await this.disconnectExpiredUsers();
+            await this.retryPendingRouterRevocations();
             await this.consumeFreeBytes();
         } catch (err) {
             console.error('⚠️ Expiry scheduler error:', err.message);
@@ -122,7 +123,8 @@ class ExpiryScheduler {
             // Purchases store usage_until from the app clock (local time), so the
             // exact expiry check is done in JavaScript. SQL only narrows candidates.
             const [candidates] = await db.execute(`
-                SELECT id, name, phone_number, mac_address, last_router_id, usage_until, package
+                SELECT id, name, phone_number, mac_address, last_router_id, usage_until, package,
+                       expiry_disconnect_attempts
                 FROM users
                 WHERE role = 'customer'
                   AND is_active = 1
@@ -137,52 +139,89 @@ class ExpiryScheduler {
             console.log(`⏰ Found ${expiredUsers.length} expired package user(s)`);
 
             for (const user of expiredUsers) {
-                // Always reset the DB grant, even when the router is
-                // unreachable or MAC/router is unknown (no silent survivors).
                 if (user.mac_address && user.last_router_id) {
+                    let removed = false;
+                    let failureMessage = 'Router removal failed';
                     try {
-                        const conn = await mikrotikService.getRouterConnection(user.last_router_id);
-
-                        // Find and remove the user's active hotspot session
-                        const sessions = await conn.write('/ip/hotspot/active/print', [
-                            `?mac-address=${user.mac_address}`
-                        ]);
-
-                        if (sessions.length > 0) {
-                            for (const session of sessions) {
-                                await conn.write('/ip/hotspot/active/remove', [
-                                    `=.id=${session['.id']}`
-                                ]);
-                            }
-                            console.log(`⏰ Disconnected expired user ${user.name} (${user.phone_number}) from ${user.last_router_id}`);
-                        }
+                        removed = await mikrotikService.removeUserFromRouter(user.mac_address, user.last_router_id);
                     } catch (routerErr) {
-                        console.warn(`⏰ Could not disconnect ${user.name} from ${user.last_router_id}: ${routerErr.message}`);
+                        failureMessage = routerErr.message;
                     }
+                    if (!removed) {
+                        const attempt = Number(user.expiry_disconnect_attempts || 0) + 1;
+                        await db.execute(
+                            'UPDATE users SET expiry_disconnect_attempts = COALESCE(expiry_disconnect_attempts, 0) + 1 WHERE id = ?',
+                            [user.id]
+                        );
+                        console.warn(`⏰ Could not revoke expired user ${user.name} from ${user.last_router_id}; attempt ${attempt}: ${failureMessage}`);
+                        continue;
+                    }
+                    console.log(`⏰ Disconnected expired user ${user.name} (${user.phone_number}) from ${user.last_router_id}`);
                 }
 
-                // Reset package to free tier
+                // Users without a known router/MAC have no router session to
+                // remove. All other rows reach here only after removal succeeds.
                 await db.execute(
-                    `UPDATE users SET package = 'KARIBU HOT BANDO', usage_until = NULL, usage_start = NULL, updated_at = NOW() WHERE id = ?`,
+                    `UPDATE users SET package = 'KARIBU HOT BANDO', usage_until = NULL, usage_start = NULL,
+                     expiry_disconnect_attempts = 0, updated_at = NOW() WHERE id = ?`,
                     [user.id]
                 );
 
                 // Log the event (action must be in enum: connect/disconnect/timeout/kicked/error)
-                try {
-                    const [dbRouter] = await db.execute(
-                        'SELECT id FROM mikrotiks WHERE router_id = ?',
-                        [user.last_router_id]
-                    );
-                    if (dbRouter.length > 0) {
-                        await db.execute(
-                            'INSERT INTO user_connection_logs (mac_address, router_id, user_id, action, error_message) VALUES (?, ?, ?, "disconnect", "Package expired")',
-                            [user.mac_address, dbRouter[0].id, user.id]
+                if (user.mac_address && user.last_router_id) {
+                    try {
+                        const [dbRouter] = await db.execute(
+                            'SELECT id FROM mikrotiks WHERE router_id = ?',
+                            [user.last_router_id]
                         );
-                    }
-                } catch (_) {}
+                        if (dbRouter.length > 0) {
+                            await db.execute(
+                                'INSERT INTO user_connection_logs (mac_address, router_id, user_id, action, error_message) VALUES (?, ?, ?, "disconnect", "Package expired")',
+                                [user.mac_address, dbRouter[0].id, user.id]
+                            );
+                        }
+                    } catch (_) {}
+                }
             }
         } catch (error) {
             console.error('⏰ Expiry check error:', error.message);
+        }
+    }
+
+    async retryPendingRouterRevocations() {
+        try {
+            const [pending] = await db.execute(
+                `SELECT id, user_id, mac_address, router_id, retry_count
+                 FROM pending_router_revocations ORDER BY created_at ASC LIMIT 100`
+            );
+            for (const revocation of pending) {
+                let removed = false;
+                try {
+                    removed = await mikrotikService.removeUserFromRouter(
+                        revocation.mac_address,
+                        revocation.router_id
+                    );
+                } catch (error) {
+                    console.warn(`Router revocation retry failed for ${revocation.mac_address}: ${error.message}`);
+                }
+
+                if (removed) {
+                    await db.execute('DELETE FROM pending_router_revocations WHERE id = ?', [revocation.id]);
+                    console.log(`✅ Cleared pending router revocation for ${revocation.mac_address} on ${revocation.router_id}`);
+                    continue;
+                }
+
+                const attempt = Number(revocation.retry_count || 0) + 1;
+                await db.execute(
+                    `UPDATE pending_router_revocations
+                     SET retry_count = retry_count + 1, last_error = ?, updated_at = NOW()
+                     WHERE id = ?`,
+                    ['Router removal failed', revocation.id]
+                );
+                console.warn(`Router revocation still pending for ${revocation.mac_address} on ${revocation.router_id}; attempt ${attempt}`);
+            }
+        } catch (error) {
+            console.error('Pending router revocation retry error:', error.message);
         }
     }
 }
