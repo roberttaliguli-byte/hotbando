@@ -30,6 +30,7 @@
       title="Deposit to sponsor wallet"
       :checkout-url="checkoutUrl"
       :order-tracking-id="checkoutTracking"
+      :receipt-token="checkoutReceiptToken"
       :amount="checkoutAmount"
       :provider-fee="checkoutFee"
       :total-amount="checkoutTotal"
@@ -57,6 +58,7 @@ const depositError = ref(false)
 const showCheckout = ref(false)
 const checkoutUrl = ref('')
 const checkoutTracking = ref('')
+const checkoutReceiptToken = ref('')
 const checkoutAmount = ref(0)
 const checkoutFee = ref(0)
 const checkoutTotal = ref(0)
@@ -125,6 +127,7 @@ async function deposit() {
     if (r.success && (r.redirect_url || r.checkout_url)) {
       checkoutUrl.value = r.redirect_url || r.checkout_url || ''
       checkoutTracking.value = r.order_tracking_id || r.orderReference || ''
+      checkoutReceiptToken.value = r.receiptToken || ''
       checkoutAmount.value = Number(amount.value || 0)
       checkoutFee.value = Number(r.providerFee || 0)
       checkoutTotal.value = Number(r.customerTotal || amount.value || 0)
@@ -134,6 +137,7 @@ async function deposit() {
     } else if (r.success && r.orderReference) {
       checkoutUrl.value = ''
       checkoutTracking.value = r.orderReference
+      checkoutReceiptToken.value = r.receiptToken || ''
       checkoutAmount.value = Number(amount.value || 0)
       checkoutFee.value = Number(r.providerFee || 0)
       checkoutTotal.value = Number(r.customerTotal || amount.value || 0)
@@ -167,6 +171,7 @@ function closeCheckout() {
   showCheckout.value = false
   checkoutUrl.value = ''
   checkoutTracking.value = ''
+  checkoutReceiptToken.value = ''
   checkoutAmount.value = 0
   checkoutFee.value = 0
   checkoutTotal.value = 0

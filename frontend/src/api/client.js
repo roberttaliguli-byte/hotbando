@@ -108,8 +108,8 @@ export function hotspotPost(url, data, config) {
 }
 
 
-export function apiGet(url) {
-  return api.get(url).then(r => r.data)
+export function apiGet(url, config) {
+  return api.get(url, config).then(r => r.data)
 }
 
 export function apiPost(url, data) {

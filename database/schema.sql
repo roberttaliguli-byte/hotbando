@@ -913,6 +913,7 @@ CREATE TABLE IF NOT EXISTS `reseller_withdrawals` (
 CREATE TABLE IF NOT EXISTS `clickpesa_transactions` (
   `id` INT(11) NOT NULL AUTO_INCREMENT,
   `order_reference` VARCHAR(64) NOT NULL,
+  `receipt_token_hash` CHAR(64) NULL,
   `user_id` INT(11) DEFAULT NULL,
   `amount` DECIMAL(12,2) NOT NULL,
   `phone` VARCHAR(20) DEFAULT NULL,

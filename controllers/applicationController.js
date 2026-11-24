@@ -65,7 +65,10 @@ exports.submitApplication = async (req, res) => {
     );
 
     const applicationId = result.insertId;
-    const orderRef = `AP${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).substring(2, 5).toUpperCase()}`;
+    const refSuffix = crypto.randomBytes(4).readUInt32BE(0) % (36 ** 3);
+    const orderRef = `AP${Date.now().toString(36).toUpperCase()}${refSuffix.toString(36).toUpperCase().padStart(3, '0')}`;
+    const receiptToken = crypto.randomBytes(32).toString('base64url');
+    const receiptTokenHash = crypto.createHash('sha256').update(receiptToken).digest('hex');
 
     await db.execute(
       'UPDATE applications SET order_reference = ? WHERE id = ?',
@@ -99,8 +102,8 @@ exports.submitApplication = async (req, res) => {
     );
 
     await db.execute(
-      'INSERT INTO clickpesa_transactions (order_reference, user_id, amount, phone, purpose, status, extra_data) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [orderRef, null, fee, normalizedPhone, 'application_fee', payResult.status || 'PROCESSING',
+      'INSERT INTO clickpesa_transactions (order_reference, user_id, receipt_token_hash, amount, phone, purpose, status, extra_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [orderRef, null, receiptTokenHash, fee, normalizedPhone, 'application_fee', payResult.status || 'PROCESSING',
        JSON.stringify({ application_id: applicationId, role })]
     );
 
@@ -108,6 +111,7 @@ exports.submitApplication = async (req, res) => {
       success: true,
       applicationId,
       orderReference: orderRef,
+      receiptToken,
       status: payResult.status,
       channel: payResult.channel,
       fee,

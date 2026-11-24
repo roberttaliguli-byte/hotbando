@@ -176,6 +176,7 @@ const props = defineProps({
   title: { type: String, default: 'Complete payment' },
   checkoutUrl: { type: String, default: '' },
   orderTrackingId: { type: String, default: '' },
+  receiptToken: { type: String, default: '' },
   amount: { type: [Number, String], default: 0 },
   providerFee: { type: [Number, String], default: 0 },
   totalAmount: { type: [Number, String], default: 0 },
@@ -214,7 +215,10 @@ async function checkStatus() {
   if (status.value === 'completed' || status.value === 'failed') return
   statusRequestInFlight = true
   try {
-    const r = await apiGet(`/clickpesa/status/${encodeURIComponent(props.orderTrackingId)}`)
+    const config = props.receiptToken
+      ? { headers: { 'X-Receipt-Token': props.receiptToken } }
+      : undefined
+    const r = await apiGet(`/clickpesa/status/${encodeURIComponent(props.orderTrackingId)}`, config)
     if (r.status === 'completed' || r.status === 'SUCCESS' || r.status === 'SETTLED') {
       status.value = 'completed'
       finalMessage.value = r.message || props.successMessage
@@ -282,7 +286,7 @@ function requestClose() {
 }
 
 watch(
-  () => [props.show, props.orderTrackingId],
+  () => [props.show, props.orderTrackingId, props.receiptToken],
   ([visible, tracking]) => {
     if (visible && tracking) startPolling()
     else stopPolling()

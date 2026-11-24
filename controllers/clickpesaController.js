@@ -5,7 +5,33 @@ const crypto = require('crypto');
 const { findCustomerByPhone } = require('../utils/pendingGrants');
 
 function generateOrderRef(prefix = 'HB') {
-  return prefix + Date.now().toString(36).toUpperCase() + Math.random().toString(36).substring(2, 6).toUpperCase();
+  const suffix = crypto.randomBytes(4).readUInt32BE(0) % (36 ** 4);
+  return prefix + Date.now().toString(36).toUpperCase() + suffix.toString(36).toUpperCase().padStart(4, '0');
+}
+
+function generateReceiptToken() {
+  return crypto.randomBytes(32).toString('base64url');
+}
+
+function hashReceiptToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+function ownsPayment(req, tx) {
+  const customer = req.session?.hotbando_user
+    || (req.session?.user?.role === 'customer' ? req.session.user : null);
+  if (customer?.id && Number(customer.id) === Number(tx.user_id)) return true;
+
+  const suppliedToken = req.get('x-receipt-token')
+    || (String(req.get('authorization') || '').match(/^Bearer\s+(.+)$/i)?.[1]);
+  if (!suppliedToken || !tx.receipt_token_hash) return false;
+  const suppliedHash = Buffer.from(hashReceiptToken(suppliedToken), 'hex');
+  const storedHash = Buffer.from(String(tx.receipt_token_hash), 'hex');
+  return suppliedHash.length === storedHash.length && crypto.timingSafeEqual(suppliedHash, storedHash);
+}
+
+function notFound(res) {
+  return res.status(404).json({ error: 'Malipo hayajapatikana' });
 }
 
 function generateVoucherCode() {
@@ -121,6 +147,8 @@ exports.initiatePayment = async (req, res) => {
       recipientUserId = recipient.id;
     }
     const orderReference = generateOrderRef();
+    const receiptToken = generateReceiptToken();
+    const receiptTokenHash = hashReceiptToken(receiptToken);
 
     // Server-side amount validation: amount must match the package price from DB
     let amount = req.body.amount;
@@ -172,8 +200,8 @@ exports.initiatePayment = async (req, res) => {
     }
 
     await db.execute(
-      'INSERT INTO clickpesa_transactions (order_reference, user_id, amount, phone, purpose, status, extra_data) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [orderReference, user?.id || null, amount, phone, purposeFinal, 'PENDING', JSON.stringify(extraData)]
+      'INSERT INTO clickpesa_transactions (order_reference, user_id, receipt_token_hash, amount, phone, purpose, status, extra_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [orderReference, user?.id || null, receiptTokenHash, amount, phone, purposeFinal, 'PENDING', JSON.stringify(extraData)]
     );
 
     const result = await clickpesa.initiateUSSDPush({
@@ -194,6 +222,7 @@ exports.initiatePayment = async (req, res) => {
     res.json({
       success: true,
       orderReference,
+      receiptToken,
       status: result.status,
       channel: result.channel,
       amount: Number(amount),
@@ -215,14 +244,15 @@ exports.initiatePayment = async (req, res) => {
 exports.checkStatus = async (req, res) => {
   try {
     const { orderReference } = req.params;
-    if (!orderReference) return res.status(400).json({ error: 'Order reference inahitajika' });
+    if (!orderReference) return notFound(res);
 
     const [orders] = await db.execute(
-      'SELECT status, processed, purpose, user_id, extra_data, updated_at FROM clickpesa_transactions WHERE order_reference = ?',
+      'SELECT status, processed, purpose, user_id, receipt_token_hash, extra_data, updated_at FROM clickpesa_transactions WHERE order_reference = ?',
       [orderReference]
     );
-    if (!orders.length) return res.status(404).json({ error: 'Malipo hayajapatikana' });
+    if (!orders.length) return notFound(res);
     const tx = orders[0];
+    if (!ownsPayment(req, tx)) return notFound(res);
     const storedStatus = String(tx.status || '').toUpperCase();
     if (tx.processed) {
       // The checkout modal polls this endpoint every few seconds. Only run
@@ -284,9 +314,10 @@ exports.confirmPayment = async (req, res) => {
     const [rows] = await db.execute(
       'SELECT * FROM clickpesa_transactions WHERE order_reference = ?', [orderReference]
     );
-    if (!rows.length) return res.status(404).json({ error: 'Malipo hayajapatikana' });
+    if (!rows.length) return notFound(res);
 
     const tx = rows[0];
+    if (!ownsPayment(req, tx)) return notFound(res);
     if (tx.processed) {
       try {
         await processAndActivate(orderReference);
