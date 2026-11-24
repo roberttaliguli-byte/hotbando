@@ -517,9 +517,9 @@ class MikrotikService {
         }
     }
 
-    async removeUserFromRouter(mac, routerID) {
+    async removeUserFromRouter(mac, routerID, options = {}) {
         return this._withOperationTimeout(
-            this._removeUserFromRouterImpl(mac, routerID),
+            this._removeUserFromRouterImpl(mac, routerID, options),
             `removeUserFromRouter:${mac}:${routerID}`
         );
     }
@@ -608,7 +608,7 @@ class MikrotikService {
         }
     }
 
-    async _removeUserFromRouterImpl(mac, routerID) {
+    async _removeUserFromRouterImpl(mac, routerID, options = {}) {
         if (!mac || !routerID) return false;
         const cleanMac = String(mac).toUpperCase().replace(/-/g, ':');
         try {
@@ -628,24 +628,25 @@ class MikrotikService {
                 console.log(`✅ Active session for ${cleanMac} removed from router ${routerID}`);
             }
 
-            // addUserToRouter creates a persistent local account. Remove it as
-            // well as the active session so RouterOS cannot authenticate the
-            // MAC again using stale local credentials.
-            let localUsers = await conn.write('/ip/hotspot/user/print', [
-                `?mac-address=${cleanMac}`
-            ]);
-            if (localUsers.length === 0) {
-                localUsers = await conn.write('/ip/hotspot/user/print', [
-                    `?name=${cleanMac}`
+            if (options.removePersistent === true) {
+                // addUserToRouter creates a persistent local account. Cleanup
+                // callers opt in when that account must also be removed.
+                let localUsers = await conn.write('/ip/hotspot/user/print', [
+                    `?mac-address=${cleanMac}`
                 ]);
-            }
-            const removedIds = new Set();
-            for (const localUser of localUsers) {
-                const localId = localUser['.id'];
-                if (!localId) throw new Error('Router returned a hotspot user without an ID');
-                if (removedIds.has(localId)) continue;
-                await conn.write('/ip/hotspot/user/remove', [`=.id=${localId}`]);
-                removedIds.add(localId);
+                if (localUsers.length === 0) {
+                    localUsers = await conn.write('/ip/hotspot/user/print', [
+                        `?name=${cleanMac}`
+                    ]);
+                }
+                const removedIds = new Set();
+                for (const localUser of localUsers) {
+                    const localId = localUser['.id'];
+                    if (!localId) throw new Error('Router returned a hotspot user without an ID');
+                    if (removedIds.has(localId)) continue;
+                    await conn.write('/ip/hotspot/user/remove', [`=.id=${localId}`]);
+                    removedIds.add(localId);
+                }
             }
 
             if (sessions.length > 0) {

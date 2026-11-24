@@ -34,6 +34,9 @@ const fakeDb = {
       return [{ affectedRows: user ? 1 : 0 }];
     }
     if (normalized.startsWith('select id from mikrotiks')) return [[]];
+    if (normalized.startsWith('select id, is_active, usage_until, free_bytes from users where id =')) {
+      return [state.users.filter(user => user.id === params[0])];
+    }
     if (normalized.startsWith('insert into user_connection_logs')) {
       state.logs.push({ sql, params });
       return [{ affectedRows: 1 }];
@@ -163,11 +166,23 @@ async function main() {
   assert.strictEqual(writes.length, writesBeforeUnbound);
   console.log('PASS 3: an expired user without a MAC/router is reset immediately');
 
-  // 4. Queue a failed suspend/delete revocation, retain it after a failed
+  // 4. Default logout removal only ends active sessions; persistent local
+  // hotspot credentials remain available for a later login.
+  activeSessions = [{ '.id': '*active-logout' }];
+  localUsers = [{ '.id': '*user-logout', name: 'AA:BB:CC:DD:EE:FF', 'mac-address': 'AA:BB:CC:DD:EE:FF' }];
+  const persistentRemovalsBeforeLogout = writes.filter(row => row.command === '/ip/hotspot/user/remove').length;
+  await mikrotikService.removeUserFromRouter('AA:BB:CC:DD:EE:FF', 'router-test');
+  assert.deepStrictEqual(activeSessions, []);
+  assert.strictEqual(localUsers.length, 1);
+  assert.strictEqual(writes.filter(row => row.command === '/ip/hotspot/user/remove').length, persistentRemovalsBeforeLogout);
+  console.log('PASS 4: logout/default removal ends the active session and keeps the persistent hotspot user');
+
+  // 5. Queue a failed suspend/delete revocation, retain it after a failed
   // scheduler attempt, then clear it after the stub router becomes reachable.
   routerUnavailable = true;
   activeSessions = [{ '.id': '*active-2' }];
   localUsers = [{ '.id': '*user-2', name: 'AA:BB:CC:DD:EE:FF', 'mac-address': 'AA:BB:CC:DD:EE:FF' }];
+  state.users = [];
   const queued = await revokeOrQueue({ id: 3, mac_address: 'AA:BB:CC:DD:EE:FF', last_router_id: 'router-test' }, 'delete');
   assert.strictEqual(queued.pending, true);
   assert.strictEqual(state.pending.length, 1);
@@ -176,11 +191,26 @@ async function main() {
   assert.strictEqual(state.pending[0].retry_count, 1);
 
   routerUnavailable = false;
+  // An active, entitled customer may have been restored after the revocation
+  // was queued. The scheduler must clear the stale request without router I/O.
+  state.users = [{ id: 3, is_active: 1, usage_until: new Date(Date.now() + 60_000), free_bytes: 0 }];
+  const writesBeforeActiveRecheck = writes.length;
+  await scheduler.retryPendingRouterRevocations();
+  assert.strictEqual(state.pending.length, 0);
+  assert.strictEqual(writes.length, writesBeforeActiveRecheck);
+  console.log('PASS 5: active entitled customer pending revocation clears without touching the router');
+
+  // Deleted customers (no DB row) continue through the router removal path.
+  state.users = [];
+  routerUnavailable = true;
+  await revokeOrQueue({ id: 4, mac_address: 'AA:BB:CC:DD:EE:FF', last_router_id: 'router-test' }, 'delete');
+  assert.strictEqual(state.pending.length, 1);
+  routerUnavailable = false;
   await scheduler.retryPendingRouterRevocations();
   assert.strictEqual(state.pending.length, 0);
   assert.deepStrictEqual(activeSessions, []);
   assert.deepStrictEqual(localUsers, []);
-  console.log('PASS 4: pending revocation retries after router failure and clears after successful removal');
+  console.log('PASS 6: deleted-user pending revocation retries and clears after successful router removal');
 
   // RADIUS authorize consults is_active for both MAC and phone lookups.
   const radiusPath = path.join(__dirname, '..', 'freeradius', 'perl', 'hotbando_auth.pl');

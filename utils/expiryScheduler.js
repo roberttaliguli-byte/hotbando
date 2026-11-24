@@ -100,7 +100,7 @@ class ExpiryScheduler {
                 const hasTime = u.usage_until && new Date(u.usage_until) > new Date();
                 if (Number(u.free_bytes) <= 0 && !hasTime && u.mac_address && u.last_router_id) {
                     try {
-                        await mikrotikService.removeUserFromRouter(u.mac_address, u.last_router_id);
+                        await mikrotikService.removeUserFromRouter(u.mac_address, u.last_router_id, { removePersistent: true });
                         console.log(`⏰ Free data exhausted — disconnected ${u.name}`);
                     } catch (e) {
                         console.warn(`⏰ Could not disconnect exhausted user ${u.name}: ${e.message}`);
@@ -143,7 +143,7 @@ class ExpiryScheduler {
                     let removed = false;
                     let failureMessage = 'Router removal failed';
                     try {
-                        removed = await mikrotikService.removeUserFromRouter(user.mac_address, user.last_router_id);
+                        removed = await mikrotikService.removeUserFromRouter(user.mac_address, user.last_router_id, { removePersistent: true });
                     } catch (routerErr) {
                         failureMessage = routerErr.message;
                     }
@@ -154,6 +154,7 @@ class ExpiryScheduler {
                             [user.id]
                         );
                         console.warn(`⏰ Could not revoke expired user ${user.name} from ${user.last_router_id}; attempt ${attempt}: ${failureMessage}`);
+                        if (attempt > 5) console.error(`🚨 Expiry router removal has failed ${attempt} times for user ${user.id} (${user.name}) on ${user.last_router_id}`);
                         continue;
                     }
                     console.log(`⏰ Disconnected expired user ${user.name} (${user.phone_number}) from ${user.last_router_id}`);
@@ -195,11 +196,26 @@ class ExpiryScheduler {
                  FROM pending_router_revocations ORDER BY created_at ASC LIMIT 100`
             );
             for (const revocation of pending) {
+                const [users] = await db.execute(
+                    'SELECT id, is_active, usage_until, free_bytes FROM users WHERE id = ?',
+                    [revocation.user_id]
+                );
+                const customer = users[0];
+                if (customer && Number(customer.is_active) === 1) {
+                    const hasTime = customer.usage_until && new Date(customer.usage_until) > new Date();
+                    const hasFreeBytes = Number(customer.free_bytes) > 0;
+                    if (hasTime || hasFreeBytes) {
+                        await db.execute('DELETE FROM pending_router_revocations WHERE id = ?', [revocation.id]);
+                        console.log(`Cleared pending router revocation for ${revocation.mac_address}: customer ${customer.id} is active with entitlement (${hasTime ? 'valid usage_until' : 'free_bytes remaining'})`);
+                        continue;
+                    }
+                }
                 let removed = false;
                 try {
                     removed = await mikrotikService.removeUserFromRouter(
                         revocation.mac_address,
-                        revocation.router_id
+                        revocation.router_id,
+                        { removePersistent: true }
                     );
                 } catch (error) {
                     console.warn(`Router revocation retry failed for ${revocation.mac_address}: ${error.message}`);

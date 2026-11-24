@@ -1,6 +1,7 @@
 class MikroTikMockService {
     constructor() {
         this.users = new Map(); // Store mock users
+        this.activeSessions = new Map();
     }
     
     async addUserToRouter(mac, routerID) {
@@ -10,6 +11,7 @@ class MikroTikMockService {
             addedAt: new Date(),
             status: 'active'
         });
+        this.activeSessions.set(mac, { routerID, addedAt: new Date(), status: 'active' });
         
         // Simulate API delay
         return new Promise(resolve => {
@@ -17,9 +19,10 @@ class MikroTikMockService {
         });
     }
     
-    async removeUserFromRouter(mac, routerID) {
+    async removeUserFromRouter(mac, routerID, options = {}) {
         console.log(`[MOCK] Removing user ${mac} from router ${routerID}`);
-        this.users.delete(mac);
+        this.activeSessions.delete(mac);
+        if (options.removePersistent === true) this.users.delete(mac);
         
         return new Promise(resolve => {
             setTimeout(() => resolve(true), 300);

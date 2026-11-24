@@ -14,7 +14,7 @@ async function revokeOrQueue(user, reason) {
   let removed = false;
   let errorMessage = 'Router removal failed';
   try {
-    removed = await mikrotikService.removeUserFromRouter(mac, routerId);
+    removed = await mikrotikService.removeUserFromRouter(mac, routerId, { removePersistent: true });
   } catch (error) {
     errorMessage = error.message || errorMessage;
   }
