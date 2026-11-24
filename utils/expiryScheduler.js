@@ -59,52 +59,44 @@ class ExpiryScheduler {
     }
 
     /**
-     * Charge closed RADIUS sessions against free_bytes. Each `disconnect'
-     * accounting row is charged exactly once (bytes_charged=1), so free
-     * data is finite. Users hitting 0 with no paid time are cut off.
+     * Retire processed disconnect log rows and disconnect active customers
+     * whose paid time and free-byte balance are both exhausted. Usage itself
+     * is charged only by the RADIUS Perl accounting handler.
      */
     async consumeFreeBytes() {
         try {
-            const [rows] = await db.execute(`
-                SELECT user_id,
-                       SUM(bytes_uploaded + bytes_downloaded) AS bytes_used
-                FROM user_connection_logs
-                WHERE action = 'disconnect' AND bytes_charged = 0 AND user_id IS NOT NULL
-                GROUP BY user_id
-            `);
-            if (rows.length === 0) return;
+            await db.execute(
+                'UPDATE user_connection_logs SET bytes_charged = 1 WHERE action = \'disconnect\' AND bytes_charged = 0'
+            );
 
-            for (const r of rows) {
-                const used = Number(r.bytes_used) || 0;
-                if (used <= 0) {
-                    await db.execute(
-                        'UPDATE user_connection_logs SET bytes_charged = 1 WHERE action = \'disconnect\' AND bytes_charged = 0 AND user_id = ?',
-                        [r.user_id]
+            // This sweep runs even when there are no new disconnect rows. The
+            // Perl RADIUS handler may have exhausted free_bytes during an
+            // active session, so waiting for a Stop packet would leave access
+            // open until another accounting event arrives.
+            const [exhaustedUsers] = await db.execute(`
+                SELECT id, name, mac_address, last_router_id
+                FROM users
+                WHERE role = 'customer'
+                  AND is_active = 1
+                  AND COALESCE(free_bytes, 0) <= 0
+                  AND (usage_until IS NULL OR usage_until <= NOW())
+                  AND mac_address IS NOT NULL
+                  AND last_router_id IS NOT NULL
+            `);
+            for (const user of exhaustedUsers) {
+                try {
+                    const removed = await mikrotikService.removeUserFromRouter(
+                        user.mac_address,
+                        user.last_router_id,
+                        { removePersistent: true }
                     );
-                    continue;
-                }
-                await db.execute(
-                    'UPDATE users SET free_bytes = GREATEST(0, free_bytes - ?), updated_at = NOW() WHERE id = ?',
-                    [used, r.user_id]
-                );
-                await db.execute(
-                    'UPDATE user_connection_logs SET bytes_charged = 1 WHERE action = \'disconnect\' AND bytes_charged = 0 AND user_id = ?',
-                    [r.user_id]
-                );
-                const [users] = await db.execute(
-                    'SELECT id, name, mac_address, last_router_id, free_bytes, usage_until FROM users WHERE id = ?',
-                    [r.user_id]
-                );
-                const u = users[0];
-                if (!u) continue;
-                const hasTime = u.usage_until && new Date(u.usage_until) > new Date();
-                if (Number(u.free_bytes) <= 0 && !hasTime && u.mac_address && u.last_router_id) {
-                    try {
-                        await mikrotikService.removeUserFromRouter(u.mac_address, u.last_router_id, { removePersistent: true });
-                        console.log(`⏰ Free data exhausted — disconnected ${u.name}`);
-                    } catch (e) {
-                        console.warn(`⏰ Could not disconnect exhausted user ${u.name}: ${e.message}`);
+                    if (removed) {
+                        console.log(`⏰ Free data exhausted — disconnected ${user.name}`);
+                    } else {
+                        console.warn(`⏰ Could not disconnect exhausted user ${user.name} from ${user.last_router_id}`);
                     }
+                } catch (e) {
+                    console.warn(`⏰ Could not disconnect exhausted user ${user.name}: ${e.message}`);
                 }
             }
         } catch (error) {

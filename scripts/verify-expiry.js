@@ -9,7 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const Module = require('module');
 
-const state = { users: [], pending: [], logs: [], nextPendingId: 1 };
+const state = { users: [], pending: [], logs: [], disconnectLogs: [], nextPendingId: 1 };
 
 const fakeDb = {
   async execute(sql, params = []) {
@@ -34,6 +34,21 @@ const fakeDb = {
       return [{ affectedRows: user ? 1 : 0 }];
     }
     if (normalized.startsWith('select id from mikrotiks')) return [[]];
+    if (normalized.startsWith('update user_connection_logs set bytes_charged = 1')) {
+      for (const row of state.disconnectLogs) {
+        if (!row.bytes_charged) row.bytes_charged = 1;
+      }
+      return [{ affectedRows: 1 }];
+    }
+    if (normalized.startsWith('select id, name, mac_address, last_router_id from users')) {
+      const now = new Date();
+      return [state.users.filter(user => user.role === 'customer'
+        && Number(user.is_active) === 1
+        && Number(user.free_bytes || 0) <= 0
+        && (!user.usage_until || new Date(user.usage_until) <= now)
+        && user.mac_address && user.last_router_id)
+        .map(({ id, name, mac_address, last_router_id }) => ({ id, name, mac_address, last_router_id }))];
+    }
     if (normalized.startsWith('select id, is_active, usage_until, free_bytes from users where id =')) {
       return [state.users.filter(user => user.id === params[0])];
     }
@@ -130,6 +145,9 @@ const expiredUser = (id, overrides = {}) => ({
   usage_until: new Date(Date.now() - 60_000),
   package: 'WIKI 1',
   expiry_disconnect_attempts: 0,
+  role: 'customer',
+  is_active: 1,
+  free_bytes: 100,
   ...overrides
 });
 
@@ -211,6 +229,54 @@ async function main() {
   assert.deepStrictEqual(activeSessions, []);
   assert.deepStrictEqual(localUsers, []);
   console.log('PASS 6: deleted-user pending revocation retries and clears after successful router removal');
+
+  // 7. Disconnect rows are only marked as consumed by the scheduler. The
+  // accounting handler owns all byte deductions.
+  state.users = [{
+    id: 10, name: 'Customer 10', role: 'customer', is_active: 1,
+    free_bytes: 4321, usage_until: new Date(Date.now() + 60_000),
+    mac_address: 'AA:BB:CC:DD:EE:FF', last_router_id: 'router-test'
+  }];
+  state.disconnectLogs = [{ user_id: 10, action: 'disconnect', bytes_uploaded: 600, bytes_downloaded: 400, bytes_charged: 0 }];
+  const balanceBeforeLogRetirement = state.users[0].free_bytes;
+  await scheduler.consumeFreeBytes();
+  assert.strictEqual(state.users[0].free_bytes, balanceBeforeLogRetirement);
+  assert.strictEqual(state.disconnectLogs[0].bytes_charged, 1);
+  console.log('PASS 7: scheduler marks disconnect rows processed without reducing free_bytes');
+
+  // 8. Duplicate Stop packets can create duplicate full-total disconnect log
+  // rows; neither row changes balances now.
+  state.users = [{
+    id: 11, name: 'Customer 11', role: 'customer', is_active: 1,
+    free_bytes: 8765, usage_until: new Date(Date.now() + 60_000),
+    mac_address: 'AA:BB:CC:DD:EE:FF', last_router_id: 'router-test'
+  }];
+  state.disconnectLogs = [1, 2].map(() => ({
+    user_id: 11, action: 'disconnect', bytes_uploaded: 900, bytes_downloaded: 700, bytes_charged: 0
+  }));
+  const balanceBeforeDuplicateStops = state.users[0].free_bytes;
+  await scheduler.consumeFreeBytes();
+  assert.strictEqual(state.users[0].free_bytes, balanceBeforeDuplicateStops);
+  assert(state.disconnectLogs.every(row => row.bytes_charged === 1));
+  console.log('PASS 8: duplicate disconnect rows are marked processed and leave free_bytes unchanged');
+
+  // 9. Perl may exhaust free_bytes during an active session before a Stop
+  // arrives. The scheduler still finds and disconnects it without any log row.
+  state.users = [{
+    id: 12, name: 'Customer 12', role: 'customer', is_active: 1,
+    free_bytes: 0, usage_until: new Date(Date.now() - 60_000),
+    mac_address: 'AA:BB:CC:DD:EE:FF', last_router_id: 'router-test'
+  }];
+  state.disconnectLogs = [];
+  activeSessions = [{ '.id': '*active-exhausted' }];
+  localUsers = [{ '.id': '*user-exhausted', name: 'AA:BB:CC:DD:EE:FF', 'mac-address': 'AA:BB:CC:DD:EE:FF' }];
+  const balanceBeforeExhaustedCutoff = state.users[0].free_bytes;
+  const writesBeforeExhaustedCutoff = writes.length;
+  await scheduler.consumeFreeBytes();
+  assert.strictEqual(state.users[0].free_bytes, balanceBeforeExhaustedCutoff);
+  assert(writes.slice(writesBeforeExhaustedCutoff).some(row => row.command === '/ip/hotspot/active/remove'));
+  assert(writes.slice(writesBeforeExhaustedCutoff).some(row => row.command === '/ip/hotspot/user/remove'));
+  console.log('PASS 9: exhausted customer is disconnected on the next scheduler sweep without a new disconnect log');
 
   // RADIUS authorize consults is_active for both MAC and phone lookups.
   const radiusPath = path.join(__dirname, '..', 'freeradius', 'perl', 'hotbando_auth.pl');
